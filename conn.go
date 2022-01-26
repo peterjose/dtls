@@ -2,6 +2,10 @@ package dtls
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/rsa"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -11,6 +15,7 @@ import (
 	"time"
 
 	"github.com/pion/dtls/v2/internal/closer"
+	"github.com/pion/dtls/v2/pkg/crypto/clientcertificate"
 	"github.com/pion/dtls/v2/pkg/crypto/elliptic"
 	"github.com/pion/dtls/v2/pkg/crypto/signaturehash"
 	"github.com/pion/dtls/v2/pkg/protocol"
@@ -75,6 +80,27 @@ type Conn struct {
 	fsm *handshakeFSM
 
 	replayProtectionWindow uint
+}
+
+func filterCipherSuites(cipherSuites []CipherSuite, cert *tls.Certificate) []CipherSuite {
+	if cert == nil || cert.PrivateKey == nil {
+		return cipherSuites
+	}
+	var certType clientcertificate.Type
+	switch cert.PrivateKey.(type) {
+	case ed25519.PrivateKey, *ecdsa.PrivateKey:
+		certType = clientcertificate.ECDSASign
+	case *rsa.PrivateKey:
+		certType = clientcertificate.RSASign
+	}
+
+	filtered := []CipherSuite{}
+	for _, c := range cipherSuites {
+		if c.AuthenticationType() != CipherSuiteAuthenticationTypeCertificate || certType == c.CertificateType() {
+			filtered = append(filtered, c)
+		}
+	}
+	return filtered
 }
 
 func createConn(ctx context.Context, nextConn net.Conn, config *Config, isClient bool, initialState *State) (*Conn, error) {
@@ -173,6 +199,9 @@ func createConn(ctx context.Context, nextConn net.Conn, config *Config, isClient
 		initialEpoch:                0,
 		keyLogWriter:                config.KeyLogWriter,
 	}
+
+	cert, _ := hsCfg.getCertificate(serverName)
+	hsCfg.localCipherSuites = filterCipherSuites(cipherSuites, cert)
 
 	var initialFlight flightVal
 	var initialFSMState handshakeState
